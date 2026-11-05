@@ -1,0 +1,35 @@
+name: Import REA repository
+on:
+  create:
+permissions:
+  contents: write
+jobs:
+  import:
+    if: ${{ github.ref == 'refs/heads/rea-import' && github.repository == 'Marcelo-Preigschadt/eng_reversa' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      EXPECTED_MAIN: ${{ github.sha }}
+      REA_SOURCE_SHA: ad518cff65cc71564f678b26bcae4a3862689ad4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Import original files and commit history
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_MAIN"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -c http.https://github.com/.extraheader= fetch --no-tags https://github.com/morluto/rea.git "$REA_SOURCE_SHA"
+          git merge --no-ff --no-commit --allow-unrelated-histories -s ours "$REA_SOURCE_SHA"
+          git read-tree "$REA_SOURCE_SHA"
+          git add -- .github/workflows/rea-import.yml
+          git -c core.hooksPath=/dev/null commit -m "chore: import REA source and history [skip ci]" -m "Source: https://github.com/morluto/rea at $REA_SOURCE_SHA"
+          git diff --exit-code "$REA_SOURCE_SHA" HEAD -- . ':!.github/workflows/rea-import.yml'
+          git push origin HEAD:refs/heads/main
+          git push origin --delete rea-import
+          echo "Imported source $REA_SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "Original history commits: $(git rev-list --count "$REA_SOURCE_SHA")" >> "$GITHUB_STEP_SUMMARY"
