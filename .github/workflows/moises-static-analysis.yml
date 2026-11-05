@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      MOISES_DIR: ${{ runner.temp }}/moises-static
+      MOISES_DIR: /tmp/moises-static
       TURBO_TELEMETRY_DISABLED: "1"
     steps:
       - uses: actions/checkout@v4
@@ -81,6 +81,6 @@ jobs:
         if: always()
         with:
           name: moises-2.1.0-rea-evidence
-          path: ${{ runner.temp }}/moises-static/reports/
+          path: /tmp/moises-static/reports/
           retention-days: 1
           compression-level: 9
