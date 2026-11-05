@@ -1,0 +1,86 @@
+name: Analyze Moises 2.1.0 with REA
+on:
+  push:
+    branches: [analysis/moises-2-1-0-20261105]
+    paths: [.github/workflows/moises-static-analysis.yml]
+permissions:
+  contents: read
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      MOISES_DIR: ${{ runner.temp }}/moises-static
+      TURBO_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.22.1"
+      - name: Check process inspection and build this repository
+        run: |
+          ps -axo pid=,ppid=,pgid=,uid=,stat=,command= > /dev/null
+          npx --yes npm@11.16.0 ci
+          npx --yes npm@11.16.0 run build:cached
+      - name: Download and verify the identical official installer
+        run: |
+          mkdir -p "$MOISES_DIR/reports" "$MOISES_DIR/tools"
+          curl --fail --location --silent --show-error --max-time 300 https://desktop.moises.ai --output "$MOISES_DIR/Moises_Setup.exe"
+          echo "34807539a0f3cd81f06a2a37902a93eb0ceec7668f8a833973f4c44829c2123f  $MOISES_DIR/Moises_Setup.exe" | sha256sum -c -
+          curl --fail --location --silent --show-error --max-time 90 https://github.com/ip7z/7zip/releases/download/26.05/7z2605-linux-x64.tar.xz --output "$MOISES_DIR/tools/7zip.tar.xz"
+          tar -xJf "$MOISES_DIR/tools/7zip.tar.xz" -C "$MOISES_DIR/tools"
+          "$MOISES_DIR/tools/7zz" x -y "-o$MOISES_DIR/nsis" "$MOISES_DIR/Moises_Setup.exe" '$PLUGINSDIR/app-64.7z'
+          "$MOISES_DIR/tools/7zz" x -y "-o$MOISES_DIR/app" "$MOISES_DIR/nsis/"'$PLUGINSDIR/app-64.7z'
+      - name: Preserve exact first-party source bytes and provenance
+        run: |
+          python3 - <<'PY'
+          import pathlib,struct,json,hashlib,os
+          root=pathlib.Path(os.environ['MOISES_DIR'])
+          p=root/'app/resources/app.asar'; out=root/'source';out.mkdir()
+          selected=[]
+          with p.open('rb') as f:
+            a=struct.unpack('<4I',f.read(16)); h=json.loads(f.read(a[3])); data_start=8+a[1]
+            def walk(obj,prefix=''):
+              for name,e in obj.get('files',{}).items():
+                q=prefix+name
+                if 'files' in e:yield from walk(e,q+'/')
+                else:yield q,e
+            for name,e in walk(h):
+              if name!='package.json' and not name.startswith('out/'):continue
+              target=out/name;target.parent.mkdir(parents=True,exist_ok=True)
+              if e.get('unpacked'):data=(p.parent/'app.asar.unpacked'/name).read_bytes()
+              else:f.seek(data_start+int(e['offset']));data=f.read(e['size'])
+              target.write_bytes(data)
+              selected.append({'path':name,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()})
+          scope=['out/main/index.js','out/preload/index.cjs','out/preload/webview.cjs','out/main/audio-capture-host.js','out/main/chunks/capture-apis-J4FdMrZ-.js']
+          (root/'reports/source_manifest.json').write_text(json.dumps({'installer_sha256':hashlib.sha256((root/'Moises_Setup.exe').read_bytes()).hexdigest(),'asar_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'files':selected,'analysis_scope':scope},indent=2))
+          (root/'reports/source_selection.json').write_text(json.dumps(scope))
+          PY
+      - name: Run REA directory inspection and JavaScript analysis
+        run: |
+          node scripts/rea.mjs inspect-desktop-application "$MOISES_DIR/app" --format json > "$MOISES_DIR/reports/rea_desktop.json"
+          node scripts/rea.mjs analyze-javascript-application "$MOISES_DIR/source" --source-paths-json "$MOISES_DIR/reports/source_selection.json" --analysis-timeout-ms 120000 --max-heap-mb 1024 --detail summary --evidence_output "$MOISES_DIR/reports/rea_javascript_evidence.json" --format json > "$MOISES_DIR/reports/rea_javascript_summary.json"
+      - name: Print REA evidence summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import pathlib,json,os,hashlib
+          root=pathlib.Path(os.environ['MOISES_DIR'])/'reports'
+          print('REA_SUMMARY_BEGIN')
+          for name in ['rea_desktop.json','rea_javascript_summary.json']:
+            p=root/name
+            if not p.exists() or not p.stat().st_size:continue
+            d=json.loads(p.read_text())
+            if name=='rea_desktop.json':
+              d={'evidence_id':d.get('evidence_id'),'provider':d.get('provider'),'candidates':d.get('normalized_result',{}).get('candidates'),'coverage':d.get('normalized_result',{}).get('coverage')}
+            text=json.dumps({'file':name,'data':d},ensure_ascii=False)
+            print(text if len(text)<60000 else json.dumps({'file':name,'keys':list(d),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}))
+          print('REA_SUMMARY_END')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: moises-2.1.0-rea-evidence
+          path: ${{ runner.temp }}/moises-static/reports/
+          retention-days: 1
+          compression-level: 9
